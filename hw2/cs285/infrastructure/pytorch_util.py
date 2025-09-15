@@ -22,7 +22,7 @@ def build_mlp(
         input_size: int,
         output_size: int,
         n_layers: int,
-        size: int,
+        size: int,  # number of units in each hidden layer
         activation: Activation = 'tanh',
         output_activation: Activation = 'identity',
 ):
@@ -64,13 +64,16 @@ def build_mlp(
 
 def init_gpu(use_gpu=True, gpu_id=0):
     global device
+
     if torch.cuda.is_available() and use_gpu:
         device = torch.device("cuda:" + str(gpu_id))
         print("Using GPU id {}".format(gpu_id))
     else:
         device = torch.device("cpu")
         print("Using CPU.")
-
+    # 这里 device 被设置成了 torch.device("cuda:0") 或 torch.device("cpu")。
+    # 然后在别的地方引用时，直接用 ptu.device。
+    
 
 def set_device(gpu_id):
     torch.cuda.set_device(gpu_id)
