@@ -102,7 +102,7 @@ class PGAgent(nn.Module):
             # In other words: Q(s_t, a_t) = sum_{t'=0}^T gamma^t' r_{t'}
             # TODO: use the helper function self._discounted_return to calculate the Q-values
             q_values = [
-                np.array(self.discounted_return(rewards_i), dtype=np.float32)  # each for one trajectory
+                np.array(self._discounted_return(rewards_i), dtype=np.float32)  # each for one trajectory
                 for rewards_i in rewards
                 ]
         else:
@@ -110,7 +110,7 @@ class PGAgent(nn.Module):
             # In other words: Q(s_t, a_t) = sum_{t'=t}^T gamma^(t'-t) * r_{t'}
             # TODO: use the helper function self._discounted_reward_to_go to calculate the Q-values
             q_values = [
-                np.array(self.discounted_reward_to_go(rewards_i), dtype=np.float32)
+                np.array(self._discounted_reward_to_go(rewards_i), dtype=np.float32)
                 for rewards_i in rewards
             ]
 
@@ -132,7 +132,7 @@ class PGAgent(nn.Module):
             advantages = q_values
         else:
             # TODO: run the critic and use it as a baseline
-            values = self.critic(ptu.from_numpy(obs)).cpu().numpy().squeeze() # 自动调用 critic 的 forward 函数
+            values = self.critic(ptu.from_numpy(obs)).detach().cpu().numpy().squeeze() # 自动调用 critic 的 forward 函数
             #整体流程是：
 	        #1.	把 numpy 的 obs 转成 torch tensor → ptu.from_numpy(obs)
 	        #2.	喂给 critic 网络，得到预测值 V(s) → self.critic(...)
@@ -200,3 +200,6 @@ class PGAgent(nn.Module):
             discounted_rewards[t] = running
         
         return discounted_rewards.tolist()
+
+
+# python cs285/visual_experiment2.py
