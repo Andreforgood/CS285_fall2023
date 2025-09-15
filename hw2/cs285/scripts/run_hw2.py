@@ -19,32 +19,33 @@ MAX_NVIDEO = 2
 
 
 def run_training_loop(args):
-    logger = Logger(args.logdir)
+    logger = Logger(args.logdir)                                # logger instance for logging
 
     # set random seeds
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    ptu.init_gpu(use_gpu=not args.no_gpu, gpu_id=args.which_gpu)
+    np.random.seed(args.seed)                                   # args.seed is the random seed passed as argument
+    torch.manual_seed(args.seed)                                # the difference is that numpy is for numpy functions, torch is for pytorch functions
+    ptu.init_gpu(use_gpu=not args.no_gpu, gpu_id=args.which_gpu) # initialize GPU if available
 
     # make the gym environment
-    env = gym.make(args.env_name, render_mode=None)
-    discrete = isinstance(env.action_space, gym.spaces.Discrete)
+    env = gym.make(args.env_name, render_mode=None)             # gym is a library for reinforcement learning environments
+    discrete = isinstance(env.action_space, gym.spaces.Discrete) # check if the action space is discrete
 
     # add action noise, if needed
     if args.action_noise_std > 0:
-        assert not discrete, f"Cannot use --action_noise_std for discrete environment {args.env_name}"
-        env = ActionNoiseWrapper(env, args.seed, args.action_noise_std)
+        assert not discrete, f"Cannot use --action_noise_std for discrete environment {args.env_name}" # action noise is only for continuous action spaces
+        env = ActionNoiseWrapper(env, args.seed, args.action_noise_std) # wrap the environment with action noise
 
-    max_ep_len = args.ep_len or env.spec.max_episode_steps
+    max_ep_len = args.ep_len or env.spec.max_episode_steps # maximum episode length, either from args or from environment spec
+    # 一条 trajectory 的最大步数。若未指定 --ep_len，用环境默认。
 
-    ob_dim = env.observation_space.shape[0]
-    ac_dim = env.action_space.n if discrete else env.action_space.shape[0]
+    ob_dim = env.observation_space.shape[0]                      # dimension of observation space, the shape of which is (ob_dim,)
+    ac_dim = env.action_space.n if discrete else env.action_space.shape[0] # dimension of action space
 
     # simulation timestep, will be used for video saving
-    if hasattr(env, "model"):
-        fps = 1 / env.model.opt.timestep
+    if hasattr(env, "model"):               # if the environment has a model attribute (e.g., MuJoCo environments)
+        fps = 1 / env.model.opt.timestep    # frames per second based on the model's timestep
     else:
-        fps = env.env.metadata["render_fps"]
+        fps = env.env.metadata["render_fps"] # otherwise, use the environment's metadata for render fps
 
     # initialize agent
     agent = PGAgent(
@@ -70,17 +71,25 @@ def run_training_loop(args):
         print(f"\n********** Iteration {itr} ************")
         # TODO: sample `args.batch_size` transitions using utils.sample_trajectories
         # make sure to use `max_ep_len`
-        trajs, envsteps_this_batch = None, None  # TODO
+        
+        trajs, envsteps_this_batch = utils.sample_trajectories(
+            env, agent.actor, args.batch_size, max_ep_len
+            )  # TODO
         total_envsteps += envsteps_this_batch
 
         # trajs should be a list of dictionaries of NumPy arrays, where each dictionary corresponds to a trajectory.
         # this line converts this into a single dictionary of lists of NumPy arrays.
-        trajs_dict = {k: [traj[k] for traj in trajs] for k in trajs[0]}
+        trajs_dict = {k: [traj[k] for traj in trajs] for k in trajs[0]} # 最外层迭代是对dictionary本身迭代，也就是对key迭代，如 "observation", "action", ...
 
         # TODO: train the agent using the sampled trajectories and the agent's update function
-        train_info: dict = None
+        train_info: dict = agent.update(
+            trajs_dict["observation"],
+            trajs_dict["action"],
+            trajs_dict["reward"],
+            trajs_dict["terminal"]
+        )
 
-        if itr % args.scalar_log_freq == 0:
+        if itr % args.scalar_log_freq == 0: # logging every args.scalar_log_freq iterations
             # save eval metrics
             print("\nCollecting data for eval...")
             eval_trajs, eval_envsteps_this_batch = utils.sample_trajectories(
@@ -89,21 +98,21 @@ def run_training_loop(args):
 
             logs = utils.compute_metrics(trajs, eval_trajs)
             # compute additional metrics
-            logs.update(train_info)
+            logs.update(train_info) 
             logs["Train_EnvstepsSoFar"] = total_envsteps
             logs["TimeSinceStart"] = time.time() - start_time
-            if itr == 0:
+            if itr == 0:    # on the first iteration, log the initial data collection average return
                 logs["Initial_DataCollection_AverageReturn"] = logs[
-                    "Train_AverageReturn"
-                ]
+                    "Train_AverageReturn"   
+                ]   # the average return from the initial data collection
 
             # perform the logging
-            for key, value in logs.items():
-                print("{} : {}".format(key, value))
-                logger.log_scalar(value, key, itr)
+            for key, value in logs.items(): # logs is an OrderedDict, so the order of insertion is preserved
+                print("{} : {}".format(key, value)) # print each metric
+                logger.log_scalar(value, key, itr)  # log each metric
             print("Done logging...\n\n")
 
-            logger.flush()
+            logger.flush() # write all pending log data to disk
 
         if args.video_log_freq != -1 and itr % args.video_log_freq == 0:
             print("\nCollecting video rollouts...")
@@ -185,3 +194,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+# 在 Gym 里：Box = “一个连续空间”，也就是一个向量，每个分量的取值范围在某个区间内。
+# 如果动作是离散的，就用 .n （类别数）。
+# 如果动作是连续的，就用 .shape[0]（动作向量的长度）。

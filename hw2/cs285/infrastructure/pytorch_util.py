@@ -57,7 +57,7 @@ def build_mlp(
     layers.append(nn.Linear(in_size, output_size))
     layers.append(output_activation)
 
-    mlp = nn.Sequential(*layers)
+    mlp = nn.Sequential(*layers) # create a sequential container of layers 用 nn.Sequential 打包成一个网络对象，并放到 GPU/CPU
     mlp.to(device)
     return mlp
 
@@ -77,8 +77,10 @@ def set_device(gpu_id):
 
 
 def from_numpy(*args, **kwargs):
-    return torch.from_numpy(*args, **kwargs).float().to(device)
+    return torch.from_numpy(*args, **kwargs).float().to(device) 
+# convert numpy array to torch tensor and put it on the right device
 
 
 def to_numpy(tensor):
     return tensor.to('cpu').detach().numpy()
+# convert torch tensor to numpy array, first put it on CPU and detach it from the computation graph
