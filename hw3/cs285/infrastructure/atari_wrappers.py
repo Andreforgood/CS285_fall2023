@@ -10,10 +10,10 @@ class FireResetEnv(gym.Wrapper):
     def __init__(self, env):
         """Take action on reset for environments that are fixed until firing."""
         gym.Wrapper.__init__(self, env)
-        assert env.unwrapped.get_action_meanings()[1] == "FIRE"
-        assert len(env.unwrapped.get_action_meanings()) >= 3
+        assert env.unwrapped.get_action_meanings()[1] == "FIRE" # 1号动作是 FIRE 
+        assert len(env.unwrapped.get_action_meanings()) >= 3    # 至少有 3 个动作
 
-    def reset(self, **kwargs):
+    def reset(self, **kwargs): # reset 后连按两次（动作 id 1、2），确保游戏真的“开局运行”
         self.env.reset(**kwargs)
         obs, _, done, _ = self.env.step(1)
         if done:
@@ -27,7 +27,7 @@ class FireResetEnv(gym.Wrapper):
         return self.env.step(ac)
 
 
-class ClipRewardEnv(gym.RewardWrapper):
+class ClipRewardEnv(gym.RewardWrapper): # 把环境的即时奖励 “符号化”：正的变 +1，0 保持 0，负的变 −1
     def __init__(self, env):
         gym.RewardWrapper.__init__(self, env)
 
@@ -51,3 +51,5 @@ def wrap_deepmind(env: gym.Env):
     )
     env = FrameStack(env, num_stack=4)
     return env
+
+# 把原始 Atari 环境加工成 (4, 84, 84)、灰度、uint8，并进行帧跳等预处理。

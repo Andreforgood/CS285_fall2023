@@ -149,15 +149,29 @@ class SoftActorCritic(nn.Module):
 
         # TODO(student): Implement the different backup strategies.
         if self.target_critic_backup_type == "doubleq":
-            raise NotImplementedError
-        elif self.target_critic_backup_type == "min":
-            raise NotImplementedError
-        elif self.target_critic_backup_type == "mean":
-            raise NotImplementedError
-        else:
-            # Default, we don't need to do anything.
-            pass
+            # 典型 Double-Q：每个评论家用“另一个”的估计做目标（2个评论家时最常见）
+            # 泛化做法：将 next_qs 循环右移一位作为“对方”的估计
+            if self.num_critic_networks < 2:
+                # 只有一个评论家就退化为 mean（或直接返回）
+                next_qs = next_qs
+            else:
+                perm = list(range(self.num_critic_networks))
+                perm = perm[-1:] + perm[:-1]  # 右移一位
+                next_qs = next_qs[perm, :]  # (num_critics, B)
 
+        elif self.target_critic_backup_type == "min":
+            # Clipped Double Q：对所有 target-critics 取最小，避免过估计
+            # 结果是 (B,)；下面会 broadcast 回 (num_critics, B)
+            next_qs = torch.min(next_qs, dim=0)[0]  # (B,)
+
+        elif self.target_critic_backup_type == "mean":
+            # 多评论家取均值作为目标，更平滑稳健（REDQ 也常这么做）
+            next_qs = torch.mean(next_qs, dim=0)    # (B,)
+
+        else:
+            # "redq" 或其它策略你也可以在这里拓展；
+            # 默认直接返回每个评论家的各自估计
+            pass
 
         # If our backup strategy removed a dimension, add it back in explicitly
         # (assume the target for each critic will be the same)
@@ -188,16 +202,18 @@ class SoftActorCritic(nn.Module):
         with torch.no_grad():
             # TODO(student)
             # Sample from the actor
-            next_action_distribution: torch.distributions.Distribution = ...
-            next_action = ...
+            # 目标分支无需梯度，用 sample() 或 rsample() 都可以
+            next_action_distribution: torch.distributions.Distribution = self.actor(next_obs)
+            next_action = next_action_distribution.sample() # (B, action_dim)
 
             # Compute the next Q-values for the sampled actions
-            next_qs = ...
+            next_qs = self.target_critic(next_obs, next_action) # (num_critics, B)
+            # 用 target critic(s) 评估 Q_target(s', a')
 
             # Handle Q-values from multiple different target critic networks (if necessary)
             # (For double-Q, clip-Q, etc.)
             next_qs = self.q_backup_strategy(next_qs)
-
+            
             assert next_qs.shape == (
                 self.num_critic_networks,
                 batch_size,
@@ -205,11 +221,14 @@ class SoftActorCritic(nn.Module):
 
             if self.use_entropy_bonus and self.backup_entropy:
                 # TODO(student): Add entropy bonus to the target values for SAC
-                next_action_entropy = ...
-                next_qs += ...
+                next_action_entropy = self.entropy(next_action_distribution)  # (B,)
+                next_qs += next_action_entropy[None, :] * self.temperature
 
             # Compute the target Q-value
-            target_values: torch.Tensor = ...
+            # Bellman 目标：y = r + γ(1-d) * next_q
+            not_done = 1.0 - done.float()
+            target_values: torch.Tensor = reward[None, :] + self.discount * not_done[None, :] * next_qs
+            
             assert target_values.shape == (
                 self.num_critic_networks,
                 batch_size
@@ -217,11 +236,11 @@ class SoftActorCritic(nn.Module):
 
         # TODO(student): Update the critic
         # Predict Q-values
-        q_values = ...
+        q_values = self.critic(obs, action)  # (num_critics, B)
         assert q_values.shape == (self.num_critic_networks, batch_size), q_values.shape
 
         # Compute loss
-        loss: torch.Tensor = ...
+        loss: torch.Tensor = self.critic_loss(q_values, target_values)
 
         self.critic_optimizer.zero_grad()
         loss.backward()
@@ -240,17 +259,33 @@ class SoftActorCritic(nn.Module):
 
         # TODO(student): Compute the entropy of the action distribution.
         # Note: Think about whether to use .rsample() or .sample() here...
-        return ...
+        try:
+            ent = action_distribution.entropy()
+            # 某些分布可能返回 (B, action_dim)；对维度求和得到每个样本的总熵
+            if ent.ndim > 1:
+                ent = ent.sum(-1)
+            return ent
+        except Exception:
+            # 回退到蒙特卡洛估计：H = -E[log π(a|s)]
+            K = max(1, self.num_actor_samples)
+            # 用 rsample 保留梯度到分布参数（对 actor 损失很重要）
+            samples = action_distribution.rsample((K,))             # (K, B, A)
+            logp = action_distribution.log_prob(samples)            # (K, B)（假设 Independent 包装）
+            if logp.ndim > 2:  # 以防返回 (K,B,action_dim)
+                logp = logp.sum(-1)
+            ent = -logp.mean(dim=0)                                 # (B,)
+            return ent
 
     def actor_loss_reinforce(self, obs: torch.Tensor):
         batch_size = obs.shape[0]
 
         # TODO(student): Generate an action distribution
-        action_distribution: torch.distributions.Distribution = ...
+        action_distribution: torch.distributions.Distribution = self.actor(obs)
 
         with torch.no_grad():
             # TODO(student): draw num_actor_samples samples from the action distribution for each batch element
-            action = ...
+            K = max(1, self.num_actor_samples)
+            action = action_distribution.sample((K,))  # (K, B, A)
             assert action.shape == (
                 self.num_actor_samples,
                 batch_size,
@@ -258,21 +293,32 @@ class SoftActorCritic(nn.Module):
             ), action.shape
 
             # TODO(student): Compute Q-values for the current state-action pair
-            q_values = ...
-            assert q_values.shape == (
+            # 计算 Q(s, a_k)，注意把 (K,B,·) 展平喂入 critic，再 reshape 回来
+            obs_expand = obs.unsqueeze(0).expand(K, *obs.shape).contiguous().view(K * batch_size, *obs.shape[1:])
+            act_flat  = action.contiguous().view(K * batch_size, self.action_dim)
+
+            qs = self.critic(obs_expand, act_flat)  # (num_critics, K*B)
+            qs = qs.view(self.num_critic_networks, K, batch_size)  # (C, K, B)
+            
+            assert qs.shape == (
                 self.num_critic_networks,
                 self.num_actor_samples,
                 batch_size,
             ), q_values.shape
 
             # Our best guess of the Q-values is the mean of the ensemble
-            q_values = torch.mean(q_values, axis=0)
+            q_values = torch.mean(qs, axis=0)
             advantage = q_values
 
         # Do REINFORCE: calculate log-probs and use the Q-values
         # TODO(student)
-        log_probs = ...
-        loss = ...
+        # 计算 log π(a_k|s)（带梯度）
+        log_probs = action_distribution.log_prob(action)  # (K, B)
+        if log_probs.ndim > 2:  # 以防返回 (K,B,action_dim)
+            log_probs = log_probs.sum(-1)
+
+        # REINFORCE 损失： -E[ A * log π ]，A 不反传到 critic
+        loss = -(advantage.detach() * log_probs).mean()
 
         return loss, torch.mean(self.entropy(action_distribution))
 
@@ -283,14 +329,18 @@ class SoftActorCritic(nn.Module):
         action_distribution: torch.distributions.Distribution = self.actor(obs)
 
         # TODO(student): Sample actions
-        # Note: Think about whether to use .rsample() or .sample() here...
-        action = ...
+        
+        # 1) 分布 & 进行 reparameterized 采样（允许路径导数）
+        action_distribution: torch.distributions.Distribution = self.actor(obs)
+        action = action_distribution.rsample()  # (B, A)
 
-        # TODO(student): Compute Q-values for the sampled state-action pair
-        q_values = ...
+        # 2) 计算 Q(s, a)，对评论家取均值
+        qs = self.critic(obs, action)          # (num_critics, B)
+        q_mean = qs.mean(dim=0)                # (B,)
 
-        # TODO(student): Compute the actor loss
-        loss = ...
+        # 3) reparam 版本的 actor loss：最大化 Q ≡ 最小化 -Q
+        #    熵项（α * H）由 update_actor 外层统一加入
+        loss = -q_mean.mean()
 
         return loss, torch.mean(self.entropy(action_distribution))
 
@@ -341,16 +391,32 @@ class SoftActorCritic(nn.Module):
 
         critic_infos = []
         # TODO(student): Update the critic for num_critic_upates steps, and add the output stats to critic_infos
-
+        for _ in range(self.num_critic_updates):
+            critic_info = self.update_critic(
+                obs=observations,
+                action=actions,
+                reward=rewards,
+                next_obs=next_observations,
+                done=dones,
+            )
+            critic_infos.append(critic_info)
+            
         # TODO(student): Update the actor
-        actor_info = ...
+        actor_info = self.update_actor(obs=observations)
 
         # TODO(student): Perform either hard or soft target updates.
         # Relevant variables:
         #  - step
         #  - self.target_update_period (None when using soft updates)
         #  - self.soft_target_update_rate (None when using hard updates)
-
+        if self.soft_target_update_rate is not None:
+            # 软更新：每步用 tau 做指数滑动
+            self.soft_update_target_critic(self.soft_target_update_rate)
+        elif self.target_update_period is not None:
+            # 硬更新：每隔 N 步同步一次
+            if step % self.target_update_period == 0:
+                self.update_target_critic()
+                
         # Average the critic info over all of the steps
         critic_info = {
             k: np.mean([info[k] for info in critic_infos]) for k in critic_infos[0]

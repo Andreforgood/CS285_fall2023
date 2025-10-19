@@ -11,16 +11,16 @@ import cs285.infrastructure.pytorch_util as ptu
 class DQNAgent(nn.Module):
     def __init__(
         self,
-        observation_shape: Sequence[int],
-        num_actions: int,
-        make_critic: Callable[[Tuple[int, ...], int], nn.Module],
+        observation_shape: Sequence[int], # e.g. (4,) for CartPole-v1
+        num_actions: int, # e.g. 2 for CartPole-v1
+        make_critic: Callable[[Tuple[int, ...], int], nn.Module], # 输入 obs shape 和 action 数量，返回一个 Q 网络
         make_optimizer: Callable[[torch.nn.ParameterList], torch.optim.Optimizer],
         make_lr_schedule: Callable[
             [torch.optim.Optimizer], torch.optim.lr_scheduler._LRScheduler
-        ],
+        ], 
         discount: float,
         target_update_period: int,
-        use_double_q: bool = False,
+        use_double_q: bool = False, 
         clip_grad_norm: Optional[float] = None,
     ):
         super().__init__()
@@ -48,8 +48,12 @@ class DQNAgent(nn.Module):
         observation = ptu.from_numpy(np.asarray(observation))[None]
 
         # TODO(student): get the action from the critic using an epsilon-greedy strategy
-        action = ...
-
+        if np.random.rand() < epsilon:
+            action = torch.tensor([np.random.randint(self.num_actions)], device=ptu.device, dtype=torch.long)
+        else:
+            with torch.no_grad():
+                q_values = self.critic(observation) # Shape (1, num_actions)
+                action = torch.argmax(q_values, dim=1) # Shape (1,)
         return ptu.to_numpy(action).squeeze(0).item()
 
     def update_critic(
@@ -66,20 +70,29 @@ class DQNAgent(nn.Module):
         # Compute target values
         with torch.no_grad():
             # TODO(student): compute target values
-            next_qa_values = ...
+            next_qa_values_tgt = self.target_critic(next_obs) # Shape (batch_size, num_actions)
 
             if self.use_double_q:
-                raise NotImplementedError
+                # ------- Double DQN 核心 -------
+                # 1) 在线网络在 s' 上选动作（只用于选择，不用于打分）
+                next_qa_online = self.critic(next_obs)                       # (B, A)
+                next_action = torch.argmax(next_qa_online, dim=1)            # (B,)
+
+                 # 2) 目标网络对“在线网络选出来的动作”打分
+                next_q_values = next_qa_values_tgt.gather(1, next_action.unsqueeze(1)).squeeze(1)  # (B,)
+
             else:
-                next_action = ...
-            
-            next_q_values = ...
-            target_values = ...
+                next_action = torch.argmax(next_qa_values_tgt, dim=1) # Shape (batch_size,)
+                # 取出下一时刻的最大 Q 值
+                next_q_values = next_qa_values_tgt.gather(1, next_action.unsqueeze(1)).squeeze(1) # Shape (batch_size,)
+            # # Bellman target: r + γ * (1-done) * max_a' Q_target(s', a')
+            target_values = reward + self.discount * (1 - done) * next_q_values
 
         # TODO(student): train the critic with the target values
-        qa_values = ...
-        q_values = ... # Compute from the data actions; see torch.gather
-        loss = ...
+        qa_values = self.critic(obs) # Shape (batch_size, num_actions)
+        q_values = qa_values.gather(1, action.unsqueeze(1)).squeeze(1) # Shape (batch_size,)
+        # Compute from the data actions; see torch.gather
+        loss = self.critic_loss(q_values, target_values)
 
 
         self.critic_optimizer.zero_grad()
@@ -114,5 +127,8 @@ class DQNAgent(nn.Module):
         Update the DQN agent, including both the critic and target.
         """
         # TODO(student): update the critic, and the target if needed
-
+        critic_stats = self.update_critic(obs, action, reward, next_obs, done)
+        if step % self.target_update_period == 0:
+            self.update_target_critic()
+            
         return critic_stats

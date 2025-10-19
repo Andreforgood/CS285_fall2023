@@ -19,13 +19,13 @@ import cs285.infrastructure.pytorch_util as ptu
 class PreprocessAtari(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         assert x.ndim in [3, 4], f"Bad observation shape: {x.shape}"
-        assert x.shape[-3:] == (4, 84, 84), f"Bad observation shape: {x.shape}"
+        assert x.shape[-3:] == (4, 84, 84), f"Bad observation shape: {x.shape}" # 形状允许是 3 维（单样本 C×H×W）或 4 维（batch B×C×H×W）
         assert x.dtype == torch.uint8
 
         return x / 255.0
 
 
-def atari_dqn_config(
+def atari_dqn_config( # CNN + DQN, CNN version critic
     env_name: str,
     exp_name: Optional[str] = None,
     learning_rate: float = 1e-4,
@@ -77,6 +77,10 @@ def atari_dqn_config(
                 outside_value=5e-1,
             ).value,
         )
+    # 这里用 PyTorch 的 LambdaLR，传入一个“随 step 变化的函数”。这个函数由你们项目自定义的 PiecewiseSchedule 提供（注意它和 PyTorch 的 scheduler 不是一回事）：
+	# 0 ~ 20k 步：乘数=1.0（学习率不变）
+	# 20k ~ total_steps/2：线性衰减到 0.5
+	# 之后保持 0.5
 
     exploration_schedule = PiecewiseSchedule(
         [
@@ -85,7 +89,7 @@ def atari_dqn_config(
             (total_steps / 2, 0.01),
         ],
         outside_value=0.01,
-    )
+    ) # 前期疯狂探索，慢慢降到 0.01
 
     def make_env(render: bool = False):
         return wrap_deepmind(
